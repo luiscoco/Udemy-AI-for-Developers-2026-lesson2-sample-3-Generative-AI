@@ -7,12 +7,25 @@ It shows the core idea of Generative AI: learn patterns from data, then predict
 the next token given the context.
 """
 
+from __future__ import annotations
+
+import logging
 import random
 import re
-from collections import Counter, defaultdict
+from dataclasses import dataclass, field
+from typing import Final
+
+logger = logging.getLogger(__name__)
+
+__all__ = ["tokenize", "generate_text", "list_models", "DEFAULT_MODEL"]
+
+DEFAULT_MODEL: Final[str] = "large-language-model"
+
+Token = str
+Context = tuple[Token, ...]
 
 # Small training corpus: "learns patterns from datasets".
-_CORPUS = """
+_CORPUS: Final[str] = """
 The future of AI is a brighter place for everyone.
 The future of AI is a brighter world for developers.
 The future of AI is a brighter path to new ideas.
@@ -30,40 +43,55 @@ A brighter tomorrow starts with the tools we build today.
 Learning how AI works helps us build better software.
 """
 
-_TOKEN_RE = re.compile(r"\w+|[^\w\s]")
+_TOKEN_RE: Final[re.Pattern[str]] = re.compile(r"\w+|[^\w\s]")
+_PUNCTUATION_RE: Final[re.Pattern[str]] = re.compile(r"[^\w\s]")
 
 
-def tokenize(text: str) -> list[str]:
+def tokenize(text: str) -> list[Token]:
     """Split text into tokens (words and punctuation)."""
     return _TOKEN_RE.findall(text)
 
 
-class _NGramModel:
+@dataclass
+class NGramModel:
     """Predicts the next token from the previous `order - 1` tokens (with backoff)."""
 
-    def __init__(self, corpus: str, order: int = 4):
-        self.order = order
-        # counts[context_tuple][next_token] -> frequency
-        self.counts: dict[tuple, Counter] = defaultdict(Counter)
-        tokens = tokenize(corpus)
-        for n in range(1, order):  # context sizes 1 .. order-1
+    corpus: str
+    order: int = 4
+    # counts[context][next_token] -> frequency
+    counts: dict[Context, dict[Token, int]] = field(default_factory=dict, init=False)
+
+    def __post_init__(self) -> None:
+        tokens = tokenize(self.corpus)
+        for n in range(1, self.order):  # context sizes 1 .. order-1
             for i in range(len(tokens) - n):
                 context = tuple(t.lower() for t in tokens[i : i + n])
-                self.counts[context][tokens[i + n]] += 1
+                next_token = tokens[i + n]
+                bucket = self.counts.setdefault(context, {})
+                bucket[next_token] = bucket.get(next_token, 0) + 1
+        logger.debug(
+            "Trained n-gram model: order=%d, contexts=%d", self.order, len(self.counts)
+        )
 
-    def next_token(self, tokens: list[str], rng: random.Random) -> str | None:
-        # Back off from the longest context to the shortest until we find one.
+    def next_token(self, tokens: list[Token], rng: random.Random) -> Token | None:
+        """Back off from the longest seen context to the shortest until a match is found."""
         for n in range(min(self.order - 1, len(tokens)), 0, -1):
             context = tuple(t.lower() for t in tokens[-n:])
             candidates = self.counts.get(context)
             if candidates:
-                words, freqs = zip(*candidates.items())
-                return rng.choices(words, weights=freqs, k=1)[0]
+                words = list(candidates.keys())
+                weights = list(candidates.values())
+                return rng.choices(words, weights=weights, k=1)[0]
         return None
 
 
 # Registry of available "models".
-_MODELS = {"large-language-model": _NGramModel(_CORPUS)}
+_MODELS: Final[dict[str, NGramModel]] = {DEFAULT_MODEL: NGramModel(_CORPUS)}
+
+
+def list_models() -> list[str]:
+    """Return the names of the available models."""
+    return list(_MODELS)
 
 
 def generate_text(
@@ -76,23 +104,23 @@ def generate_text(
 
     Returns only the newly generated text (not the prompt), like a completion API.
     """
-    if model not in _MODELS:
-        raise ValueError(f"Unknown model '{model}'. Available: {list(_MODELS)}")
+    lm = _MODELS.get(model)
+    if lm is None:
+        raise ValueError(f"Unknown model {model!r}. Available: {list_models()}")
 
-    lm = _MODELS[model]
     rng = random.Random(seed)
     tokens = tokenize(prompt)
-    generated: list[str] = []
+    generated: list[Token] = []
 
     for _ in range(max_tokens):
-        nxt = lm.next_token(tokens, rng)
-        if nxt is None:
+        next_tok = lm.next_token(tokens, rng)
+        if next_tok is None:
             break
-        generated.append(nxt)
-        tokens.append(nxt)
+        generated.append(next_tok)
+        tokens.append(next_tok)
 
     # Re-join tokens: no space before punctuation.
-    text = ""
+    parts: list[str] = []
     for tok in generated:
-        text += tok if re.fullmatch(r"[^\w\s]", tok) else f" {tok}"
-    return text.strip()
+        parts.append(tok if _PUNCTUATION_RE.fullmatch(tok) else f" {tok}")
+    return "".join(parts).strip()
