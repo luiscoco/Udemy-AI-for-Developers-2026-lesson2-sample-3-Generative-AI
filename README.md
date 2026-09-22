@@ -1,4 +1,4 @@
-# Sample 3 – Generative AI
+# Generative AI
 
 A small, runnable Python app that illustrates the core idea behind **Generative AI**: *predicting the next token* from a text prompt, based on patterns learned from data.
 
